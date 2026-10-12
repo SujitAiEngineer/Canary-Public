@@ -1,0 +1,55 @@
+# Model portability (exploratory)
+
+<!-- free-model-id: nvidia/nemotron-3-super-120b-a12b:free -->
+<!-- free-model-label: tested on the 32-row gold set: 81.3% vs Haiku 84.4% -->
+<!-- free-model-caveat: 3 other candidates blocked by the free-tier daily cap -->
+
+Written for: the project owner and any reviewer of the model selector. **Status: exploratory, product feature only. Nothing here touches the locked evaluation**, which keeps Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) and refuses any other model.
+
+## What was built
+
+One model for all agents (Label Checker, Skeptic, brief writer), chosen in the UI (two selectors, model and triage), on the command line (`python orchestrator.py --drug ... --date ... --model <id> --triage ewt|locked --yes`) or in the API (`model`, `triage`, `confirm_cost`). Code: `model_router.py` (routing, adaptation, validation, estimate), `orchestrator.py`, `api/main.py`, `web/src/components/RunForm.jsx`. Tests: `tests/test_model_router.py` (17 offline tests, no network, no spend).
+
+| Model | ID | Price per million tokens (input / output) | Estimated cost of one run, nothing cached |
+|---|---|---|---|
+| Claude Haiku 4.5 (default; the locked-evaluation model) | `claude-haiku-4-5-20251001` | $1 / $5 | about $1.07 (up to $1.61) |
+| Claude Sonnet 5.5 | `claude-sonnet-5-5` | $2 / $10 | about $2.57 (up to $3.86) |
+| Claude Opus 5.5 | `claude-opus-5-5` | $4 / $20 | about $7.58 (up to $11.37) |
+| One free OpenRouter model | `openrouter:nvidia/nemotron-3-super-120b-a12b:free` (tested on the 32-row gold set, see below) | $0 | $0 |
+
+- **IDs confirmed against the Anthropic Models API list call (free, 2026-10-04):** `claude-haiku-4-5-20251001` (display name "Claude Haiku 4.5"), `claude-sonnet-5-5` ("Claude Sonnet 5.5") and `claude-opus-5-5` ("Claude Opus 5.5") are all returned exactly as the selector uses them. The previous-generation `claude-sonnet-5` and `claude-opus-5` are also listed; the selector does not use them. The Models API does not return prices, so prices come from the docs.
+- **IDs and prices were checked on 2026-10-04** against the official Anthropic models overview (platform.claude.com/docs/en/models/overview): Haiku 4.5 `claude-haiku-4-5-20251001` $1/$5, Sonnet 5.5 `claude-sonnet-5-5` $2/$10, Opus 5.5 `claude-opus-5-5` $4/$20. **Retirement notice worth knowing: the same page lists Claude Haiku 4.5 as "not sooner than October 15, 2026".** Haiku is the default and the evaluation model, so this matters for anyone rerunning the project later.
+- **Estimates** are measured Haiku tokens per call (Label Checker 2,338 in / 76 out, Skeptic 2,398 / 379, brief writer 1,898 / 447, means over the project ledgers) times the model's list price, for 150 terms, 93% of them reaching the Skeptic, 15 briefs, no batch discount, nothing cached. For Sonnet and Opus the input tokens are scaled by an assumed 1.3 (the newer tokenizer uses 1.0 to 1.35 times as many tokens) and, for Opus, an assumed 400 extra output tokens per call for thinking that cannot be turned off. Those two assumptions are not measured. A rerun of the same drug and date is cheaper (cached calls cost nothing).
+- **Paid models show the estimate and need confirmation** (UI checkbox, `--yes` or an interactive yes on the command line, `confirm_cost` in the API). **Ledger hard limit $6.00 (raised from $3.50 on 2026-10-12) for all remaining paid work outside the locked evaluation** (`run_spend.jsonl`, `canary_config.RUN_LIMIT_USD`; the older build ledger was already at $7.97 of its $8.00). **At about $7.58 per run Opus 5.5 would not fit under that limit**: the API refuses a run whose estimate would pass the limit, and the ledger stops any call that would.
+
+## How each model is called
+
+The agents keep sending the Anthropic request shape; `model_router.Router` (under the spend ledger) translates it:
+
+- **Haiku**: unchanged, byte for byte the request of the locked pipeline.
+- **Sonnet 5.5 and Opus 5.5**: according to the Anthropic docs both reject a forced `tool_choice` and non-default sampling, so a forced tool choice becomes `auto` plus a sentence naming the tool, sampling is dropped, and effort is set to low (Sonnet: thinking off with `{"type": "between_tools"}`; Opus cannot turn thinking off, so `max_tokens` gets 1,500 tokens of headroom). A response without a tool call is retried at most twice. **These request shapes are unit-tested only. No paid call was made for this step, so the live behaviour of Sonnet and Opus through the router is untested.**
+- **OpenRouter free model**: OpenAI-compatible chat completions with the same tool schemas and a forced function choice. The output is validated against the tool's schema; an invalid output is retried at most twice and then returned without a tool call, which the agents already mark invalid; a text answer that contains a valid JSON object is accepted. Rate limits (429) are backed off (Retry-After if given, else 5, 10, 20 ... 120 seconds) and resumed for up to an hour in total; a daily quota stops the run at once (results already obtained are cached on disk, so rerunning resumes); server errors and network errors retry five times.
+- **Cache keys** already contain the model string in every agent; Anthropic IDs are unchanged (existing caches stay valid) and the OpenRouter model string carries its `openrouter:` prefix, so provider and model ID are both in every key (test `test_cache_keys_include_provider_and_model`).
+- **`OPENROUTER_API_KEY` lives only in `.env`**, which is in `.gitignore` and not tracked (test `test_env_file_is_not_tracked_by_git`); it is never put in a request body or a log.
+
+## Choosing the free model by test (live, $0): Nemotron 3 Super, the only candidate that could be completed
+
+Run on 2026-10-04 with a working key, through `model_router.Router` (outputs validated against the tool schema, at most two retries, rate-limit backoff). Test script: `analysis/model_portability_test.py`; one result file per model: `analysis/model_portability_<model>.json`. The test is the Label Checker on the locked 32-row gold set (20 atorvastatin and 12 simvastatin rows, retrieval exactly as in `analysis/task7_label_checker.py`) plus a Skeptic format check on 10 terms (saved evidence packets of the atorvastatin 2011 demo run, a development drug). The rule fixed before the run: among the models whose outputs are 100% valid (32 of 32 and 10 of 10), pick the best Label Checker accuracy.
+
+| Model (OpenRouter ID) | Context; advertised parameters | Label Checker accuracy | Valid Label Checker outputs | Skeptic format check | Status |
+|---|---|---|---|---|---|
+| `nvidia/nemotron-3-super-120b-a12b:free` | 262,144; tools, tool_choice, structured outputs | **26 of 32 = 81.3%** | **32 of 32** | **10 of 10 complete** (decision matches the saved Haiku run on 7 of 10) | complete |
+| `nvidia/nemotron-3-ultra-550b-a55b:free` | 1,000,000; tools, tool_choice | not scored | 13 of 32 rows done and cached, none scored as final | not run | **blocked by the free-tier daily cap** at its 14th label call |
+| `qwen/qwen3.8-27b:free` | 262,144; tools, tool_choice, structured outputs | not run | not run | not run | **blocked by the daily cap** (0 calls completed) |
+| `google/gemma-4-31b-it:free` | 262,144; tools, tool_choice, structured outputs | not run | not run | not run | **blocked by the daily cap** (0 calls completed) |
+| `openai/gpt-oss-120b:free` | not in OpenRouter's free list on 2026-10-04 | n/a | n/a | n/a | not available |
+| Reference: Claude Haiku 4.5 (the locked evaluation's Label Checker run on the same gold set) | | 27 of 32 = 84.4% | 32 of 32 | | `EVALUATION_PLAN.md` section 5a, $0.0889 |
+
+- **The daily cap.** OpenRouter's free tier allows **50 free-model requests per day** for an account without credit ("Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day"). The cap was reached during Ultra's 14th label call, after Super's whole run and 13 Ultra calls (OpenRouter's own count may differ, for example by counting retries). **The 13 Ultra label rows are cached** on disk under Ultra's own cache key (the cache key includes the provider and the model ID), so a later run would resume from row 14; the result file `analysis/model_portability_nvidia_nemotron-3-ultra-550b-a55b_free.json` records the stop. Qwen and Gemma completed no call; their result files record the stop. The candidates were chosen as: the two named by the owner (the two Nemotron models), plus two free tool-calling models from other families that advertise tool choice and structured outputs on OpenRouter's current list (Qwen 3.8 27B and Gemma 4 31B). The key's status call shows a $1 limit and no usage: nothing was spent.
+- **Decision (owner, 2026-10-04): stop the free-model testing.** Ultra, Qwen and Gemma are not retried and no OpenRouter credit is added. **Nemotron 3 Super is the free option.** This is not a win over the other candidates (three of them could not be tested); it is the only one that completed the test, with 100% valid outputs on both parts. In the UI it is labelled "tested on the 32-row gold set: 81.3% vs Haiku 84.4%; 3 other candidates blocked by the free-tier daily cap".
+- **What the 81.3% means.** Six misses of 32: TYPE 2 DIABETES MELLITUS (gold yes, predicted partial), ASTHENIA (gold partial, predicted no), DEATH (gold partial, predicted yes), VOMITING (gold partial, predicted no), LIVER INJURY (gold partial, predicted yes), COUGH (gold no, predicted partial). Confusion table (rows gold, columns predicted): yes 14 / 2 / 0; partial 1 / 3 / 1; no 0 / 2 / 9. That is below Haiku's 84.4% on the same 32 rows by one row; with 32 rows a one-row difference is within noise. The Skeptic format check tests only that the output is complete and well formed; its decisions differ from the saved Haiku run on 3 of 10 terms (it dismissed BLOOD CHOLESTEROL INCREASED, STENT PLACEMENT and CORONARY ARTERY SURGERY, which Haiku recommended), which is not a measure of correctness.
+- Not tested live: Sonnet 5.5 and Opus 5.5 through the router (no paid calls), and any free model other than Super.
+
+## What the offline tests cover (and do not)
+
+Covered with fake clients and fake HTTP: the request adaptation for each model, the OpenAI translation of system, messages, tools and forced choice, parsing of tool calls and of JSON in text, the schema validator (including the real Skeptic and writer schemas), at most two retries then invalid, usage summed over retries, 429 backoff with and without Retry-After, the wait budget, the daily-limit stop, server-error retries, the missing-key error, cache-key separation across providers, the cost estimates and their ordering, the confirmation rules, the evaluation's refusal of any other model, one model reaching all three agents, the free model costing $0 in the ledger, and the API's model list and confirmation responses. **Not covered by these offline tests: any live call.** Live checks made separately: the Models API list (IDs) and the free-model test above (Nemotron 3 Super only); Sonnet 5.5 and Opus 5.5 were never called through the router.
