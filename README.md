@@ -125,6 +125,7 @@ UI and selector checks, all with fake providers (no model call, no spend, and th
 | Locked results, supplementary gabapentin run | `eval_out/eval_results.md`, `eval_out/eval_supplementary_gabapentin.md`, `eval_out/` (per-quarter data, every run's outputs) |
 | The evaluation log: every run, bug fix, amendment, post-result analysis, in order | `eval_runs.md` |
 | The whole study in plain language, every number traced to a log entry and commit | `docs/evaluation_study.md` |
+| An example of what Canary produces | `examples/brief_montelukast_2008-06-30.md` (a live run, with its note in `examples/README.md`) |
 | Checkpoint notes (course checkpoints 1.1 to 7.1) | `docs/checkpoint_notes.md` |
 | Model choices, prices, limits | `model_portability.md` |
 | Data feasibility and design evidence (Phases 0 to 2) | `analysis/` (`analysis/README.md`, `phase0_findings.md`, `phase1_findings.md`, `phase2_findings.md`); the Phase 0 to 2 commands are in `docs/phase_scripts.md` |
